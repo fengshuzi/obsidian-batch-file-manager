@@ -1,0 +1,175 @@
+.batch-file-manager-view {
+  padding: 10px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.batch-manager-toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.batch-manager-toolbar button {
+  padding: 6px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.batch-manager-toolbar button:hover {
+  background: var(--background-modifier-hover);
+}
+
+.batch-manager-toolbar button.mod-warning {
+  color: var(--text-error);
+  border-color: var(--text-error);
+}
+
+.batch-manager-toolbar button.mod-warning:hover {
+  background: var(--background-modifier-error);
+}
+
+.batch-manager-count {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 6px 12px;
+}
+
+.batch-manager-file-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+}
+
+.batch-manager-file-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  cursor: pointer;
+}
+
+.batch-manager-file-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.batch-manager-file-item input[type="checkbox"] {
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+}
+
+.batch-manager-file-name {
+  flex: 1;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-manager-empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 40px;
+  font-size: 14px;
+}
+
+.batch-manager-tag-filter {
+  padding: 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tag-filter-label {
+  font-size: 13px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.tag-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-radius: 12px;
+  font-size: 12px;
+  cursor: default;
+}
+
+.tag-remove {
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 50%;
+}
+
+.tag-remove:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.clear-filter-btn {
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  cursor: pointer;
+}
+
+.clear-filter-btn:hover {
+  background: var(--background-modifier-hover);
+}
+
+.tag-search-container {
+  margin-bottom: 10px;
+}
+
+.tag-list-container {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.tag-filter-item {
+  display: flex;
+  align-items: center;
+  padding: 5px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.tag-filter-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.modal-description {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 10px 0;
+}
+
+.modal-input-container {
+  margin: 15px 0;
+}
+
+.modal-button-container {
+  margin-top: 20px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
