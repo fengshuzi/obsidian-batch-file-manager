@@ -9,7 +9,7 @@
     "deploy": "npm run build && node deploy.mjs"
   },
   "keywords": [],
-  "author": "",
+  "author": "lizhifeng",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^16.11.6",

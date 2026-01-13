@@ -4,6 +4,6 @@
   "version": "1.0.0",
   "minAppVersion": "0.15.0",
   "description": "批量管理文件：支持批量选择、删除、移动文件",
-  "author": "Your Name",
+  "author": "lizhifeng",
   "isDesktopOnly": false
 }
