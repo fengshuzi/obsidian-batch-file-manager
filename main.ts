@@ -23,6 +23,130 @@ const DEFAULT_SETTINGS: BatchFileManagerSettings = {
   imageFolders: 'assets'
 };
 
+class FolderSelectModal extends Modal {
+  folders: TFolder[];
+  onSubmit: (folder: TFolder | null) => void;
+
+  constructor(app: App, onSubmit: (folder: TFolder | null) => void) {
+    super(app);
+    this.onSubmit = onSubmit;
+    this.folders = this.getAllFolders();
+  }
+
+  getAllFolders(): TFolder[] {
+    const folders: TFolder[] = [];
+    const rootFolder = this.app.vault.getRoot();
+    
+    const collectFolders = (folder: TFolder) => {
+      folders.push(folder);
+      for (const child of folder.children) {
+        if (child instanceof TFolder) {
+          collectFolders(child);
+        }
+      }
+    };
+    
+    collectFolders(rootFolder);
+    return folders;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+
+    contentEl.createEl('h2', { text: '选择文件夹' });
+
+    const description = contentEl.createEl('p', { 
+      text: '选择一个文件夹来查看其中的笔记',
+      cls: 'modal-description'
+    });
+    description.style.marginBottom = '15px';
+
+    // 搜索框
+    const searchContainer = contentEl.createDiv({ cls: 'folder-search-container' });
+    const searchInput = new TextComponent(searchContainer);
+    searchInput.setPlaceholder('搜索文件夹...');
+    searchInput.inputEl.style.width = '100%';
+    searchInput.inputEl.style.marginBottom = '10px';
+
+    // 文件夹列表容器
+    const folderListContainer = contentEl.createDiv({ cls: 'folder-list-container' });
+    folderListContainer.style.maxHeight = '400px';
+    folderListContainer.style.overflowY = 'auto';
+    folderListContainer.style.border = '1px solid var(--background-modifier-border)';
+    folderListContainer.style.borderRadius = '4px';
+    folderListContainer.style.padding = '10px';
+    folderListContainer.style.marginBottom = '15px';
+
+    const renderFolderList = (filter: string = '') => {
+      folderListContainer.empty();
+      
+      const filteredFolders = filter 
+        ? this.folders.filter(folder => folder.path.toLowerCase().includes(filter.toLowerCase()))
+        : this.folders;
+
+      if (filteredFolders.length === 0) {
+        folderListContainer.createEl('p', { text: '未找到匹配的文件夹', cls: 'modal-description' });
+        return;
+      }
+
+      filteredFolders.forEach(folder => {
+        const folderItem = folderListContainer.createDiv({ cls: 'folder-filter-item' });
+        folderItem.style.display = 'flex';
+        folderItem.style.alignItems = 'center';
+        folderItem.style.padding = '8px';
+        folderItem.style.cursor = 'pointer';
+        folderItem.style.borderRadius = '4px';
+
+        const icon = folderItem.createEl('span', { text: '📁 ' });
+        icon.style.marginRight = '8px';
+
+        const label = folderItem.createEl('span', { text: folder.path || '/' });
+        label.style.flex = '1';
+
+        folderItem.onclick = () => {
+          this.onSubmit(folder);
+          this.close();
+        };
+
+        folderItem.onmouseenter = () => {
+          folderItem.style.backgroundColor = 'var(--background-modifier-hover)';
+        };
+        folderItem.onmouseleave = () => {
+          folderItem.style.backgroundColor = '';
+        };
+      });
+    };
+
+    renderFolderList();
+
+    searchInput.onChange((value) => {
+      renderFolderList(value);
+    });
+
+    // 按钮容器
+    const buttonContainer = contentEl.createDiv({ cls: 'modal-button-container' });
+    buttonContainer.style.display = 'flex';
+    buttonContainer.style.justifyContent = 'space-between';
+    buttonContainer.style.gap = '10px';
+
+    const showAllBtn = buttonContainer.createEl('button', { text: '显示所有笔记' });
+    showAllBtn.onclick = () => {
+      this.onSubmit(null);
+      this.close();
+    };
+
+    const cancelBtn = buttonContainer.createEl('button', { text: '取消' });
+    cancelBtn.onclick = () => {
+      this.close();
+    };
+  }
+
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
+  }
+}
+
 class TagFilterModal extends Modal {
   availableTags: string[];
   selectedTags: Set<string>;
@@ -402,6 +526,7 @@ class BatchFileManagerView extends ItemView {
   private files: FileItem[] = [];
   private allFiles: FileItem[] = []; // 保存所有文件
   private currentFolder: TFolder | null = null;
+  private selectedFolder: TFolder | null = null; // 当前选中的文件夹
   private plugin: BatchFileManagerPlugin;
   private availableTags: Set<string> = new Set();
   private selectedTags: Set<string> = new Set();
@@ -471,9 +596,19 @@ class BatchFileManagerView extends ItemView {
     const findBrokenImagesBtn = toolbar.createEl('button', { text: '查找失效图片' });
     findBrokenImagesBtn.onclick = () => this.findBrokenImages();
 
+    const findUntaggedBtn = toolbar.createEl('button', { text: '查找无标签笔记' });
+    findUntaggedBtn.onclick = () => this.findUntaggedNotes();
+
+    const findOrphanBtn = toolbar.createEl('button', { text: '查找孤立笔记' });
+    findOrphanBtn.onclick = () => this.findOrphanNotes();
+
     // 按标签筛选按钮
     const filterByTagBtn = toolbar.createEl('button', { text: '按标签筛选' });
     filterByTagBtn.onclick = () => this.showTagFilterModal();
+
+    // 按文件夹筛选按钮
+    const filterByFolderBtn = toolbar.createEl('button', { text: '按文件夹筛选' });
+    filterByFolderBtn.onclick = () => this.showFolderSelectModal();
 
     // 刷新按钮
     const refreshBtn = toolbar.createEl('button', { text: '刷新' });
@@ -504,6 +639,32 @@ class BatchFileManagerView extends ItemView {
       clearAllBtn.onclick = () => {
         this.selectedTags.clear();
         this.filterFilesByTags();
+        this.renderView();
+      };
+    }
+
+    // 文件夹筛选显示区域
+    if (this.selectedFolder) {
+      const folderFilterDiv = container.createDiv({ cls: 'batch-manager-folder-filter' });
+      folderFilterDiv.style.padding = '10px';
+      folderFilterDiv.style.marginBottom = '10px';
+      folderFilterDiv.style.backgroundColor = 'var(--background-secondary)';
+      folderFilterDiv.style.borderRadius = '4px';
+      folderFilterDiv.style.display = 'flex';
+      folderFilterDiv.style.alignItems = 'center';
+      folderFilterDiv.style.gap = '10px';
+      
+      folderFilterDiv.createEl('span', { text: '📁 当前文件夹: ', cls: 'folder-filter-label' });
+      
+      const folderPath = folderFilterDiv.createEl('span', { cls: 'folder-path' });
+      folderPath.setText(this.selectedFolder.path || '/');
+      folderPath.style.fontWeight = 'bold';
+      folderPath.style.flex = '1';
+      
+      const clearFolderBtn = folderFilterDiv.createEl('button', { text: '清除', cls: 'clear-filter-btn' });
+      clearFolderBtn.onclick = () => {
+        this.selectedFolder = null;
+        this.applyFilters();
         this.renderView();
       };
     }
@@ -578,8 +739,8 @@ class BatchFileManagerView extends ItemView {
     // 提取所有标签
     await this.extractAllTags();
     
-    // 应用标签筛选
-    this.filterFilesByTags();
+    // 应用所有筛选条件
+    this.applyFilters();
     
     this.renderView();
   }
@@ -622,16 +783,40 @@ class BatchFileManagerView extends ItemView {
   }
 
   private filterFilesByTags() {
-    if (this.selectedTags.size === 0) {
-      // 没有筛选条件，显示所有文件
-      this.files = [...this.allFiles];
-      return;
+    // 这个方法已被 applyFilters 替代，但保留以兼容旧代码
+    this.applyFilters();
+  }
+
+  private applyFilters() {
+    let filteredFiles = [...this.allFiles];
+
+    // 应用文件夹筛选
+    if (this.selectedFolder) {
+      filteredFiles = filteredFiles.filter(item => {
+        return this.isFileInFolder(item.file, this.selectedFolder!);
+      });
     }
 
-    // 筛选包含任意选中标签的文件（OR 关系）
-    this.files = this.allFiles.filter(item => {
-      return this.fileHasAnyTag(item.file, this.selectedTags);
-    });
+    // 应用标签筛选
+    if (this.selectedTags.size > 0) {
+      filteredFiles = filteredFiles.filter(item => {
+        return this.fileHasAnyTag(item.file, this.selectedTags);
+      });
+    }
+
+    this.files = filteredFiles;
+  }
+
+  private isFileInFolder(file: TFile, folder: TFolder): boolean {
+    // 检查文件是否在指定文件夹或其子文件夹中
+    let parent = file.parent;
+    while (parent) {
+      if (parent.path === folder.path) {
+        return true;
+      }
+      parent = parent.parent;
+    }
+    return false;
   }
 
   private fileHasAnyTag(file: TFile, requiredTags: Set<string>): boolean {
@@ -685,7 +870,15 @@ class BatchFileManagerView extends ItemView {
   private showTagFilterModal() {
     new TagFilterModal(this.app, Array.from(this.availableTags), this.selectedTags, (selectedTags) => {
       this.selectedTags = selectedTags;
-      this.filterFilesByTags();
+      this.applyFilters();
+      this.renderView();
+    }).open();
+  }
+
+  private showFolderSelectModal() {
+    new FolderSelectModal(this.app, (folder) => {
+      this.selectedFolder = folder;
+      this.applyFilters();
       this.renderView();
     }).open();
   }
@@ -1087,6 +1280,132 @@ class BatchFileManagerView extends ItemView {
     }
     
     return false;
+  }
+
+  private async findUntaggedNotes() {
+    new Notice('正在查找无标签笔记...');
+    
+    const allMarkdownFiles = this.app.vault.getMarkdownFiles();
+    const untaggedFiles: TFile[] = [];
+    
+    for (const file of allMarkdownFiles) {
+      try {
+        const cache = this.app.metadataCache.getFileCache(file);
+        let hasTags = false;
+        
+        // 检查 frontmatter 中的标签
+        if (cache?.frontmatter?.tags) {
+          const fmTags = cache.frontmatter.tags;
+          if (Array.isArray(fmTags) && fmTags.length > 0) {
+            hasTags = true;
+          } else if (typeof fmTags === 'string' && fmTags.trim()) {
+            hasTags = true;
+          }
+        }
+        
+        // 检查内容中的标签
+        if (!hasTags && cache?.tags && cache.tags.length > 0) {
+          hasTags = true;
+        }
+        
+        // 如果没有任何标签，添加到列表
+        if (!hasTags) {
+          untaggedFiles.push(file);
+        }
+      } catch (error) {
+        console.error(`检查文件标签失败: ${file.path}`, error);
+      }
+    }
+    
+    if (untaggedFiles.length === 0) {
+      new Notice('未发现无标签笔记');
+      return;
+    }
+    
+    // 更新文件列表，只显示无标签的文件
+    this.allFiles = untaggedFiles.map(file => ({
+      file,
+      selected: false
+    }));
+    this.files = [...this.allFiles];
+    
+    this.files.sort((a, b) => a.file.path.localeCompare(b.file.path));
+    this.renderView();
+    
+    new Notice(`发现 ${untaggedFiles.length} 个无标签笔记`);
+  }
+
+  private async findOrphanNotes() {
+    new Notice('正在查找孤立笔记...');
+    
+    const allMarkdownFiles = this.app.vault.getMarkdownFiles();
+    const orphanFiles: TFile[] = [];
+    
+    // 构建所有笔记的链接关系图
+    const linkedFiles = new Set<string>();
+    const filesWithLinks = new Set<string>();
+    
+    for (const file of allMarkdownFiles) {
+      try {
+        const cache = this.app.metadataCache.getFileCache(file);
+        
+        // 检查该文件是否有出链（链接到其他文件）
+        const hasOutgoingLinks = cache?.links && cache.links.length > 0;
+        const hasEmbeds = cache?.embeds && cache.embeds.length > 0;
+        
+        if (hasOutgoingLinks || hasEmbeds) {
+          filesWithLinks.add(file.path);
+          
+          // 记录所有被链接的文件
+          if (cache.links) {
+            for (const link of cache.links) {
+              const linkedFile = this.app.metadataCache.getFirstLinkpathDest(link.link, file.path);
+              if (linkedFile) {
+                linkedFiles.add(linkedFile.path);
+              }
+            }
+          }
+          
+          if (cache.embeds) {
+            for (const embed of cache.embeds) {
+              const linkedFile = this.app.metadataCache.getFirstLinkpathDest(embed.link, file.path);
+              if (linkedFile) {
+                linkedFiles.add(linkedFile.path);
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`检查文件链接失败: ${file.path}`, error);
+      }
+    }
+    
+    // 查找孤立笔记：既没有出链，也没有入链
+    for (const file of allMarkdownFiles) {
+      const hasOutgoingLinks = filesWithLinks.has(file.path);
+      const hasIncomingLinks = linkedFiles.has(file.path);
+      
+      if (!hasOutgoingLinks && !hasIncomingLinks) {
+        orphanFiles.push(file);
+      }
+    }
+    
+    if (orphanFiles.length === 0) {
+      new Notice('未发现孤立笔记');
+      return;
+    }
+    
+    // 更新文件列表，只显示孤立的文件
+    this.allFiles = orphanFiles.map(file => ({
+      file,
+      selected: false
+    }));
+    this.files = [...this.allFiles];
+    
+    this.files.sort((a, b) => a.file.path.localeCompare(b.file.path));
+    this.renderView();
+    
+    new Notice(`发现 ${orphanFiles.length} 个孤立笔记`);
   }
 }
 

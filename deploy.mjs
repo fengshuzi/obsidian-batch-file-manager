@@ -41,8 +41,12 @@ const vaults = [
   }
 ];
 
-// 需要复制的文件
-const files = ['main.js', 'manifest.json', 'styles.css'];
+// 需要复制的文件（都从 dist 目录）
+const files = [
+  { src: 'dist/main.js', dest: 'main.js' },
+  { src: 'dist/manifest.json', dest: 'manifest.json' },
+  { src: 'dist/styles.css', dest: 'styles.css' }
+];
 
 console.log('🚀 开始部署 Batch File Manager 插件...\n');
 
@@ -61,11 +65,14 @@ vaults.forEach((vault) => {
     
     // 复制文件
     files.forEach((file) => {
-      if (existsSync(file)) {
-        copyFileSync(file, join(vault.path, file));
-        console.log(`  ✓ 已复制 ${file}`);
+      const srcFile = typeof file === 'string' ? file : file.src;
+      const destFile = typeof file === 'string' ? file : file.dest;
+      
+      if (existsSync(srcFile)) {
+        copyFileSync(srcFile, join(vault.path, destFile));
+        console.log(`  ✓ 已复制 ${srcFile} -> ${destFile}`);
       } else {
-        console.log(`  ⚠️  警告: ${file} 不存在`);
+        console.log(`  ⚠️  警告: ${srcFile} 不存在`);
       }
     });
     
