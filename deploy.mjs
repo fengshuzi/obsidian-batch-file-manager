@@ -94,3 +94,12 @@ console.log('\n💡 提示: 在 Obsidian 中重新加载插件以查看更改');
 console.log('   - 打开命令面板 (Cmd/Ctrl + P)');
 console.log('   - 搜索 "Reload app without saving"');
 console.log('   - 或者禁用再启用插件\n');
+
+// 清理 dist 文件夹
+import { rmSync } from 'fs';
+try {
+  rmSync('dist', { recursive: true, force: true });
+  console.log('🧹 已清理 dist 文件夹\n');
+} catch (error) {
+  console.log('⚠️  清理 dist 文件夹失败:', error.message, '\n');
+}
