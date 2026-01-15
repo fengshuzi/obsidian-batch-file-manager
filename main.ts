@@ -602,6 +602,9 @@ class BatchFileManagerView extends ItemView {
     const findOrphanBtn = toolbar.createEl('button', { text: '查找孤立笔记' });
     findOrphanBtn.onclick = () => this.findOrphanNotes();
 
+    const findEmptyBtn = toolbar.createEl('button', { text: '查找空文件' });
+    findEmptyBtn.onclick = () => this.findEmptyFiles();
+
     // 按标签筛选按钮
     const filterByTagBtn = toolbar.createEl('button', { text: '按标签筛选' });
     filterByTagBtn.onclick = () => this.showTagFilterModal();
@@ -1285,10 +1288,14 @@ class BatchFileManagerView extends ItemView {
   private async findUntaggedNotes() {
     new Notice('正在查找无标签笔记...');
     
-    const allMarkdownFiles = this.app.vault.getMarkdownFiles();
+    // 如果有选中的文件夹，只在该文件夹中查找
+    const filesToCheck = this.selectedFolder 
+      ? this.app.vault.getMarkdownFiles().filter(file => this.isFileInFolder(file, this.selectedFolder!))
+      : this.app.vault.getMarkdownFiles();
+    
     const untaggedFiles: TFile[] = [];
     
-    for (const file of allMarkdownFiles) {
+    for (const file of filesToCheck) {
       try {
         const cache = this.app.metadataCache.getFileCache(file);
         let hasTags = false;
@@ -1303,9 +1310,34 @@ class BatchFileManagerView extends ItemView {
           }
         }
         
-        // 检查内容中的标签
+        // 检查内容中的标签（通过 metadataCache）
         if (!hasTags && cache?.tags && cache.tags.length > 0) {
           hasTags = true;
+        }
+        
+        // 如果还没找到标签，读取文件内容检查是否有 #标签 格式
+        if (!hasTags) {
+          const content = await this.app.vault.read(file);
+          // 匹配 #标签 格式（标签可以在任何位置，包括列表项末尾）
+          // 匹配规则：# 后面跟着非空白字符，直到遇到空白、换行或文件结束
+          const tagPattern = /#[^\s#\[\](){}]+/g;
+          const matches = content.match(tagPattern);
+          if (matches && matches.length > 0) {
+            // 过滤掉可能的误判（比如 markdown 标题 # 开头的）
+            const validTags = matches.filter(match => {
+              // 检查这个 # 前面是否是行首，如果是则可能是标题
+              const index = content.indexOf(match);
+              if (index > 0) {
+                const charBefore = content[index - 1];
+                // 如果前面是空白字符或标点，则是有效标签
+                return /[\s\-\(\)\[\]（）【】]/.test(charBefore);
+              }
+              return false; // 行首的 # 可能是标题
+            });
+            if (validTags.length > 0) {
+              hasTags = true;
+            }
+          }
         }
         
         // 如果没有任何标签，添加到列表
@@ -1318,7 +1350,8 @@ class BatchFileManagerView extends ItemView {
     }
     
     if (untaggedFiles.length === 0) {
-      new Notice('未发现无标签笔记');
+      const scope = this.selectedFolder ? `文件夹 "${this.selectedFolder.path}" 中` : '';
+      new Notice(`${scope}未发现无标签笔记`);
       return;
     }
     
@@ -1332,11 +1365,17 @@ class BatchFileManagerView extends ItemView {
     this.files.sort((a, b) => a.file.path.localeCompare(b.file.path));
     this.renderView();
     
-    new Notice(`发现 ${untaggedFiles.length} 个无标签笔记`);
+    const scope = this.selectedFolder ? `文件夹 "${this.selectedFolder.path}" 中` : '';
+    new Notice(`${scope}发现 ${untaggedFiles.length} 个无标签笔记`);
   }
 
   private async findOrphanNotes() {
     new Notice('正在查找孤立笔记...');
+    
+    // 如果有选中的文件夹，只在该文件夹中查找
+    const filesToCheck = this.selectedFolder 
+      ? this.app.vault.getMarkdownFiles().filter(file => this.isFileInFolder(file, this.selectedFolder!))
+      : this.app.vault.getMarkdownFiles();
     
     const allMarkdownFiles = this.app.vault.getMarkdownFiles();
     const orphanFiles: TFile[] = [];
@@ -1380,8 +1419,8 @@ class BatchFileManagerView extends ItemView {
       }
     }
     
-    // 查找孤立笔记：既没有出链，也没有入链
-    for (const file of allMarkdownFiles) {
+    // 查找孤立笔记：既没有出链，也没有入链（只在指定范围内查找）
+    for (const file of filesToCheck) {
       const hasOutgoingLinks = filesWithLinks.has(file.path);
       const hasIncomingLinks = linkedFiles.has(file.path);
       
@@ -1391,7 +1430,8 @@ class BatchFileManagerView extends ItemView {
     }
     
     if (orphanFiles.length === 0) {
-      new Notice('未发现孤立笔记');
+      const scope = this.selectedFolder ? `文件夹 "${this.selectedFolder.path}" 中` : '';
+      new Notice(`${scope}未发现孤立笔记`);
       return;
     }
     
@@ -1405,7 +1445,73 @@ class BatchFileManagerView extends ItemView {
     this.files.sort((a, b) => a.file.path.localeCompare(b.file.path));
     this.renderView();
     
-    new Notice(`发现 ${orphanFiles.length} 个孤立笔记`);
+    const scope = this.selectedFolder ? `文件夹 "${this.selectedFolder.path}" 中` : '';
+    new Notice(`${scope}发现 ${orphanFiles.length} 个孤立笔记`);
+  }
+
+  private async findEmptyFiles() {
+    new Notice('正在查找空文件...');
+    
+    // 如果有选中的文件夹，只在该文件夹中查找
+    const filesToCheck = this.selectedFolder 
+      ? this.app.vault.getMarkdownFiles().filter(file => this.isFileInFolder(file, this.selectedFolder!))
+      : this.app.vault.getMarkdownFiles();
+    
+    const emptyFiles: TFile[] = [];
+    
+    for (const file of filesToCheck) {
+      try {
+        const content = await this.app.vault.read(file);
+        
+        // 检查是否为空文件
+        if (content.trim() === '') {
+          emptyFiles.push(file);
+          continue;
+        }
+        
+        // 检查是否只有 frontmatter
+        const lines = content.split('\n');
+        if (lines[0] === '---') {
+          // 找到 frontmatter 结束位置
+          let endIndex = -1;
+          for (let i = 1; i < lines.length; i++) {
+            if (lines[i] === '---') {
+              endIndex = i;
+              break;
+            }
+          }
+          
+          if (endIndex > 0) {
+            // 检查 frontmatter 后面是否还有内容
+            const contentAfterFrontmatter = lines.slice(endIndex + 1).join('\n').trim();
+            if (contentAfterFrontmatter === '') {
+              emptyFiles.push(file);
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`检查文件内容失败: ${file.path}`, error);
+      }
+    }
+    
+    if (emptyFiles.length === 0) {
+      const scope = this.selectedFolder ? `文件夹 "${this.selectedFolder.path}" 中` : '';
+      new Notice(`${scope}未发现空文件`);
+      return;
+    }
+    
+    // 更新文件列表，只显示空文件
+    this.allFiles = emptyFiles.map(file => ({
+      file,
+      selected: false
+    }));
+    this.files = [...this.allFiles];
+    
+    this.files.sort((a, b) => a.file.path.localeCompare(b.file.path));
+    this.renderView();
+    
+    const scope = this.selectedFolder ? `文件夹 "${this.selectedFolder.path}" 中` : '';
+    new Notice(`${scope}发现 ${emptyFiles.length} 个空文件`);
   }
 }
 
