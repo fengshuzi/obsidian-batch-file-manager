@@ -522,6 +522,99 @@ class ReplaceTagModal extends Modal {
   }
 }
 
+class RenameFrontmatterPropertyModal extends Modal {
+  oldProperty: string;
+  newProperty: string;
+  onSubmit: (oldProperty: string, newProperty: string) => void;
+
+  constructor(app: App, onSubmit: (oldProperty: string, newProperty: string) => void) {
+    super(app);
+    this.onSubmit = onSubmit;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+
+    contentEl.createEl('h2', { text: '批量重命名元数据属性' });
+
+    const description = contentEl.createEl('p', { 
+      text: '将 frontmatter 中的旧属性名重命名为新属性名',
+      cls: 'modal-description'
+    });
+    description.style.marginBottom = '15px';
+
+    // 旧属性名输入
+    const oldPropertyContainer = contentEl.createDiv({ cls: 'modal-input-container' });
+    oldPropertyContainer.createEl('label', { text: '旧属性名:' });
+    const oldPropertyInput = new TextComponent(oldPropertyContainer);
+    oldPropertyInput.inputEl.style.width = '100%';
+    oldPropertyInput.setPlaceholder('例如: category 或 是否锻炼');
+    oldPropertyInput.onChange((value) => {
+      this.oldProperty = value;
+    });
+
+    // 新属性名输入
+    const newPropertyContainer = contentEl.createDiv({ cls: 'modal-input-container' });
+    newPropertyContainer.style.marginTop = '15px';
+    newPropertyContainer.createEl('label', { text: '新属性名:' });
+    const newPropertyInput = new TextComponent(newPropertyContainer);
+    newPropertyInput.inputEl.style.width = '100%';
+    newPropertyInput.setPlaceholder('例如: type 或 运动打卡');
+    newPropertyInput.onChange((value) => {
+      this.newProperty = value;
+    });
+
+    // 按回车提交
+    const handleEnter = (e: KeyboardEvent) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        this.submit();
+      }
+    };
+    oldPropertyInput.inputEl.addEventListener('keydown', handleEnter);
+    newPropertyInput.inputEl.addEventListener('keydown', handleEnter);
+
+    const buttonContainer = contentEl.createDiv({ cls: 'modal-button-container' });
+    buttonContainer.style.marginTop = '20px';
+    buttonContainer.style.display = 'flex';
+    buttonContainer.style.justifyContent = 'flex-end';
+    buttonContainer.style.gap = '10px';
+
+    const cancelBtn = buttonContainer.createEl('button', { text: '取消' });
+    cancelBtn.onclick = () => {
+      this.close();
+    };
+
+    const submitBtn = buttonContainer.createEl('button', { text: '确定', cls: 'mod-cta' });
+    submitBtn.onclick = () => {
+      this.submit();
+    };
+
+    // 自动聚焦第一个输入框
+    setTimeout(() => {
+      oldPropertyInput.inputEl.focus();
+    }, 10);
+  }
+
+  submit() {
+    if (!this.oldProperty || !this.oldProperty.trim()) {
+      new Notice('请输入旧属性名');
+      return;
+    }
+    if (!this.newProperty || !this.newProperty.trim()) {
+      new Notice('请输入新属性名');
+      return;
+    }
+    this.onSubmit(this.oldProperty.trim(), this.newProperty.trim());
+    this.close();
+  }
+
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
+  }
+}
+
 class BatchFileManagerView extends ItemView {
   private files: FileItem[] = [];
   private allFiles: FileItem[] = []; // 保存所有文件
@@ -585,6 +678,9 @@ class BatchFileManagerView extends ItemView {
 
     const replaceTagBtn = toolbar.createEl('button', { text: '批量替换标签' });
     replaceTagBtn.onclick = () => this.replaceTagsInSelected();
+
+    const renamePropertyBtn = toolbar.createEl('button', { text: '重命名元数据属性' });
+    renamePropertyBtn.onclick = () => this.renameFrontmatterProperty();
 
     const deleteBtn = toolbar.createEl('button', { text: '删除选中', cls: 'mod-warning' });
     deleteBtn.onclick = () => this.deleteSelected();
@@ -1147,6 +1243,86 @@ class BatchFileManagerView extends ItemView {
       new Notice(message);
       
       // 刷新文件列表以更新标签显示
+      await this.loadFiles();
+    }).open();
+  }
+
+  private async renameFrontmatterProperty() {
+    const selected = this.getSelectedFiles();
+    if (selected.length === 0) {
+      new Notice('请先选择要修改的文件');
+      return;
+    }
+
+    new RenameFrontmatterPropertyModal(this.app, async (oldProperty, newProperty) => {
+      let successCount = 0;
+      let failCount = 0;
+      let notFoundCount = 0;
+
+      for (const file of selected) {
+        try {
+          const content = await this.app.vault.read(file);
+          const lines = content.split('\n');
+          
+          // 检查是否有 frontmatter
+          if (lines[0] !== '---') {
+            notFoundCount++;
+            continue;
+          }
+
+          // 找到 frontmatter 结束位置
+          let endIndex = -1;
+          for (let i = 1; i < lines.length; i++) {
+            if (lines[i] === '---') {
+              endIndex = i;
+              break;
+            }
+          }
+
+          if (endIndex === -1) {
+            notFoundCount++;
+            continue;
+          }
+
+          // 查找并替换属性名
+          let propertyFound = false;
+          for (let i = 1; i < endIndex; i++) {
+            const line = lines[i];
+            // 匹配属性名（支持中文、英文、数字、下划线、连字符等）
+            // 匹配格式: 属性名: 值 或 "属性名": 值
+            const propertyMatch = line.match(/^(\s*)(['"]?)([^'":\s]+)\2(\s*):/);
+            if (propertyMatch && propertyMatch[3] === oldProperty) {
+              // 保留原有的缩进和格式
+              const indent = propertyMatch[1];
+              const quote = propertyMatch[2];
+              const spacing = propertyMatch[4];
+              const valueStart = line.indexOf(':', indent.length + quote.length + oldProperty.length + quote.length);
+              const value = line.substring(valueStart + 1);
+              
+              lines[i] = `${indent}${quote}${newProperty}${quote}${spacing}:${value}`;
+              propertyFound = true;
+            }
+          }
+
+          if (!propertyFound) {
+            notFoundCount++;
+            continue;
+          }
+
+          // 保存修改后的内容
+          const newContent = lines.join('\n');
+          await this.app.vault.modify(file, newContent);
+          successCount++;
+        } catch (error) {
+          console.error(`重命名属性失败: ${file.path}`, error);
+          failCount++;
+        }
+      }
+
+      const message = `重命名完成: 成功 ${successCount} 个，未找到 ${notFoundCount} 个，失败 ${failCount} 个`;
+      new Notice(message);
+      
+      // 刷新文件列表
       await this.loadFiles();
     }).open();
   }
