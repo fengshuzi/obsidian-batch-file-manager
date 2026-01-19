@@ -787,17 +787,26 @@ class BatchFileManagerView extends ItemView {
       // 复选框
       const checkbox = fileItem.createEl('input', { type: 'checkbox' });
       checkbox.checked = item.selected;
-      checkbox.onchange = () => {
+      checkbox.onchange = (e) => {
+        e.stopPropagation(); // 阻止事件冒泡
         item.selected = checkbox.checked;
         this.updateCount();
+      };
+      checkbox.onclick = (e) => {
+        e.stopPropagation(); // 阻止点击复选框时触发文件打开
       };
 
       // 文件名
       const fileName = fileItem.createDiv({ cls: 'batch-manager-file-name' });
       fileName.setText(item.file.path);
-      fileName.onclick = () => {
+
+      // 整个文件项都可以点击打开文件
+      fileItem.onclick = () => {
         this.app.workspace.getLeaf().openFile(item.file);
       };
+
+      // 添加 hover 样式
+      fileItem.style.cursor = 'pointer';
 
       // 右键菜单
       fileItem.oncontextmenu = (e) => {
