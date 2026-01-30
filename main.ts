@@ -692,6 +692,9 @@ class BatchFileManagerView extends ItemView {
     const findBrokenImagesBtn = toolbar.createEl('button', { text: '查找失效图片' });
     findBrokenImagesBtn.onclick = () => this.findBrokenImages();
 
+    const findUnreferencedImagesBtn = toolbar.createEl('button', { text: '查找未引用图片' });
+    findUnreferencedImagesBtn.onclick = () => this.findUnreferencedImages();
+
     const findUntaggedBtn = toolbar.createEl('button', { text: '查找无标签笔记' });
     findUntaggedBtn.onclick = () => this.findUntaggedNotes();
 
@@ -1430,6 +1433,93 @@ class BatchFileManagerView extends ItemView {
     this.renderView();
     
     new Notice(`发现 ${brokenImageFiles.length} 个笔记包含失效图片`);
+  }
+
+  /** 递归收集文件夹下所有扩展名在 exts 中的图片文件 */
+  private collectImageFilesInFolder(folder: TFolder, exts: Set<string>): TFile[] {
+    const result: TFile[] = [];
+    for (const child of folder.children) {
+      if (child instanceof TFile) {
+        if (exts.has(child.extension.toLowerCase())) result.push(child);
+      } else if (child instanceof TFolder) {
+        result.push(...this.collectImageFilesInFolder(child, exts));
+      }
+    }
+    return result;
+  }
+
+  /** 获取配置的图片文件夹下所有图片文件 */
+  private getAllImageFilesInConfiguredFolders(): TFile[] {
+    const exts = new Set(
+      this.plugin.settings.imageExtensions
+        .split(',')
+        .map(ext => ext.trim().toLowerCase())
+    );
+    const folderPaths = this.plugin.settings.imageFolders
+      .split(',')
+      .map(f => f.trim())
+      .filter(f => f);
+    const seen = new Set<string>();
+    const result: TFile[] = [];
+    for (const folderPath of folderPaths) {
+      const folder = this.app.vault.getAbstractFileByPath(folderPath);
+      if (!folder || !(folder instanceof TFolder)) continue;
+      for (const file of this.collectImageFilesInFolder(folder, exts)) {
+        if (!seen.has(file.path)) {
+          seen.add(file.path);
+          result.push(file);
+        }
+      }
+    }
+    return result;
+  }
+
+  /** 查找 assets 等配置文件夹下未被任何笔记引用的图片 */
+  private async findUnreferencedImages() {
+    new Notice('正在扫描未引用图片...');
+
+    const imageFiles = this.getAllImageFilesInConfiguredFolders();
+    if (imageFiles.length === 0) {
+      new Notice('配置的图片文件夹下没有找到图片，请检查「图片文件夹」设置');
+      return;
+    }
+
+    const imagePathSet = new Set(imageFiles.map(f => f.path));
+    const referencedPaths = new Set<string>();
+
+    const allMd = this.app.vault.getMarkdownFiles();
+    for (const md of allMd) {
+      const cache = this.app.metadataCache.getFileCache(md);
+      if (!cache) continue;
+      const linksToResolve = [
+        ...(cache.embeds || []),
+        ...(cache.links || [])
+      ];
+      for (const link of linksToResolve) {
+        // 先按原始 link 解析，再按 URL 解码后的路径解析（含空格的图片常被写成 %20，不解码会误判为未引用）
+        const decoded = this.safeDecodeUriPath(link.link);
+        const linkVariants = decoded !== link.link ? [link.link, decoded] : [link.link];
+        for (const linkPath of linkVariants) {
+          const dest = this.app.metadataCache.getFirstLinkpathDest(linkPath, md.path);
+          if (dest && dest instanceof TFile && imagePathSet.has(dest.path)) {
+            referencedPaths.add(dest.path);
+            break;
+          }
+        }
+      }
+    }
+
+    const unreferenced = imageFiles.filter(f => !referencedPaths.has(f.path));
+    if (unreferenced.length === 0) {
+      new Notice('未发现未被引用的图片');
+      return;
+    }
+
+    this.allFiles = unreferenced.map(file => ({ file, selected: false }));
+    this.files = [...this.allFiles];
+    this.files.sort((a, b) => a.file.path.localeCompare(b.file.path));
+    this.renderView();
+    new Notice(`发现 ${unreferenced.length} 张未引用图片`);
   }
 
   /** 尝试对 URL 编码的路径解码（如 %20 -> 空格），解码失败则返回原串 */
