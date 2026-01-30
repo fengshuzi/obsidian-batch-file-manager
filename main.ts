@@ -701,6 +701,10 @@ class BatchFileManagerView extends ItemView {
     const findEmptyBtn = toolbar.createEl('button', { text: '查找空文件' });
     findEmptyBtn.onclick = () => this.findEmptyFiles();
 
+    // 图片重命名（文件名-001 格式）
+    const renameImagesBtn = toolbar.createEl('button', { text: '图片重命名(文件名-001)' });
+    renameImagesBtn.onclick = () => this.renameImagesToNoteName();
+
     // 按标签筛选按钮
     const filterByTagBtn = toolbar.createEl('button', { text: '按标签筛选' });
     filterByTagBtn.onclick = () => this.showTagFilterModal();
@@ -1371,27 +1375,29 @@ class BatchFileManagerView extends ItemView {
           
           // 移除可能的尺寸参数 (例如: image.png|100)
           imagePath = imagePath.split('|')[0].trim();
-          
+          // 支持 URL 编码的路径（如 %20 -> 空格），避免误判为失效
+          const imagePathDecoded = this.safeDecodeUriPath(imagePath);
+
           // 检查是否是外部链接
-          const isExternal = imagePath.startsWith('http://') || imagePath.startsWith('https://');
-          
+          const isExternal = imagePathDecoded.startsWith('http://') || imagePathDecoded.startsWith('https://');
+
           // 根据配置决定是否扫描外部链接
           if (isExternal && !this.plugin.settings.scanExternalImages) {
             continue;
           }
-          
+
           // 外部链接跳过文件系统检查
           if (isExternal) {
             continue;
           }
-          
-          // 检查文件扩展名
-          const ext = imagePath.split('.').pop()?.toLowerCase();
+
+          // 检查文件扩展名（用解码后的路径，避免 %2E 等影响）
+          const ext = imagePathDecoded.split('.').pop()?.toLowerCase();
           if (ext && !validExtensions.includes(ext)) {
             continue;
           }
-          
-          // 检查图片是否存在
+
+          // 检查图片是否存在（内部会同时尝试编码与解码路径）
           const imageExists = await this.checkImageExists(file, imagePath, imageFolders);
           
           if (!imageExists) {
@@ -1426,47 +1432,61 @@ class BatchFileManagerView extends ItemView {
     new Notice(`发现 ${brokenImageFiles.length} 个笔记包含失效图片`);
   }
 
-  private async checkImageExists(sourceFile: TFile, imagePath: string, imageFolders: string[]): Promise<boolean> {
-    // 1. 尝试直接路径（相对于 vault 根目录）
-    if (this.app.vault.getAbstractFileByPath(imagePath)) {
-      return true;
+  /** 尝试对 URL 编码的路径解码（如 %20 -> 空格），解码失败则返回原串 */
+  private safeDecodeUriPath(path: string): string {
+    try {
+      return decodeURIComponent(path);
+    } catch {
+      return path;
     }
-    
-    // 2. 尝试相对于当前文件的路径
+  }
+
+  private async checkImageExists(sourceFile: TFile, imagePath: string, imageFolders: string[]): Promise<boolean> {
+    const tryPath = (path: string) => this.app.vault.getAbstractFileByPath(path);
+    const pathsToTry = [imagePath, this.safeDecodeUriPath(imagePath)];
+    if (pathsToTry[0] === pathsToTry[1]) pathsToTry.pop();
+
+    // 1. 尝试直接路径（相对于 vault 根目录），先原始再解码
+    for (const p of pathsToTry) {
+      if (tryPath(p)) return true;
+    }
+
     const fileDir = sourceFile.parent?.path || '';
+
+    // 2. 尝试相对于当前文件的路径
     if (fileDir) {
-      const relativePath = `${fileDir}/${imagePath}`;
-      if (this.app.vault.getAbstractFileByPath(relativePath)) {
-        return true;
+      for (const p of pathsToTry) {
+        const relativePath = `${fileDir}/${p}`;
+        if (tryPath(relativePath)) return true;
       }
     }
-    
+
     // 3. 尝试在配置的图片文件夹中查找
     for (const folder of imageFolders) {
-      const folderPath = `${folder}/${imagePath}`;
-      if (this.app.vault.getAbstractFileByPath(folderPath)) {
-        return true;
-      }
-      
-      // 也尝试相对于当前文件所在目录的图片文件夹
-      if (fileDir) {
-        const relativeFolderPath = `${fileDir}/${folder}/${imagePath}`;
-        if (this.app.vault.getAbstractFileByPath(relativeFolderPath)) {
-          return true;
+      for (const p of pathsToTry) {
+        const folderPath = `${folder}/${p}`;
+        if (tryPath(folderPath)) return true;
+        if (fileDir) {
+          const relativeFolderPath = `${fileDir}/${folder}/${p}`;
+          if (tryPath(relativeFolderPath)) return true;
         }
       }
     }
-    
-    // 4. 尝试只用文件名在整个 vault 中查找
-    const fileName = imagePath.split('/').pop();
+
+    // 4. 尝试只用文件名在整个 vault 中查找（解码后的文件名）
+    const decodedPath = this.safeDecodeUriPath(imagePath);
+    const fileName = decodedPath.split('/').pop();
     if (fileName) {
       const allFiles = this.app.vault.getFiles();
       const found = allFiles.find(f => f.name === fileName);
-      if (found) {
-        return true;
+      if (found) return true;
+      const encodedFileName = imagePath.split('/').pop();
+      if (encodedFileName && encodedFileName !== fileName) {
+        const foundEnc = allFiles.find(f => f.name === encodedFileName);
+        if (foundEnc) return true;
       }
     }
-    
+
     return false;
   }
 
@@ -1697,6 +1717,144 @@ class BatchFileManagerView extends ItemView {
     
     const scope = this.selectedFolder ? `文件夹 "${this.selectedFolder.path}" 中` : '';
     new Notice(`${scope}发现 ${emptyFiles.length} 个空文件`);
+  }
+
+  /** 获取笔记内嵌入的图片文件（按出现顺序，去重） */
+  private getEmbeddedImages(note: TFile): TFile[] {
+    const cache = this.app.metadataCache.getFileCache(note);
+    if (!cache?.embeds?.length) return [];
+
+    const imageExtensions = this.plugin.settings.imageExtensions
+      .split(',')
+      .map(ext => ext.trim().toLowerCase());
+    const seen = new Set<string>();
+    const result: TFile[] = [];
+
+    for (const embed of cache.embeds) {
+      const file = this.app.metadataCache.getFirstLinkpathDest(embed.link, note.path);
+      if (!file || !(file instanceof TFile)) continue;
+      const ext = file.extension.toLowerCase();
+      if (!imageExtensions.includes(ext)) continue;
+      if (seen.has(file.path)) continue;
+      seen.add(file.path);
+      result.push(file);
+    }
+    return result;
+  }
+
+  /** 获取文件夹中已占用的「基名-数字」编号，用于避免重名 */
+  private getUsedNumberSuffixes(folderPath: string, baseName: string, ext: string): Set<number> {
+    const used = new Set<number>();
+    const folder = this.app.vault.getAbstractFileByPath(folderPath);
+    if (!folder || !(folder instanceof TFolder)) return used;
+    const prefix = baseName + '-';
+    const suffix = '.' + ext;
+    for (const child of folder.children) {
+      if (!(child instanceof TFile)) continue;
+      if (!child.name.startsWith(prefix) || !child.name.endsWith(suffix)) continue;
+      const numStr = child.name.slice(prefix.length, child.name.length - suffix.length);
+      const num = parseInt(numStr, 10);
+      if (numStr === String(num) && num >= 1 && num <= 999) used.add(num);
+    }
+    return used;
+  }
+
+  /** 将选中笔记内的图片重命名为「笔记名-001」「笔记名-002」等，并更新引用 */
+  private async renameImagesToNoteName() {
+    const selected = this.getSelectedFiles();
+    if (selected.length === 0) {
+      new Notice('请先选择要处理的笔记');
+      return;
+    }
+
+    const noteFiles = selected.filter(f => f.extension === 'md');
+    if (noteFiles.length === 0) {
+      new Notice('选中的文件中没有笔记（.md）');
+      return;
+    }
+
+    let totalRenamed = 0;
+    let totalSkipped = 0;
+    let totalFailed = 0;
+
+    for (const note of noteFiles) {
+      const images = this.getEmbeddedImages(note);
+      if (images.length === 0) continue;
+
+      const baseName = note.basename;
+      const usedNumbersByFolder: Record<string, Set<number>> = {};
+
+      for (const img of images) {
+        const ext = img.extension;
+        const imgFolderPath = img.parent?.path ?? '';
+        const key = imgFolderPath + '|' + ext;
+        if (!usedNumbersByFolder[key]) {
+          usedNumbersByFolder[key] = this.getUsedNumberSuffixes(imgFolderPath, baseName, ext);
+        }
+        const usedNumbers = usedNumbersByFolder[key];
+
+        let num = 1;
+        while (usedNumbers.has(num)) num++;
+        usedNumbers.add(num);
+        const newName = `${baseName}-${String(num).padStart(3, '0')}.${ext}`;
+        const newPath = imgFolderPath ? `${imgFolderPath}/${newName}` : newName;
+
+        if (img.name === newName) {
+          totalSkipped++;
+          continue;
+        }
+
+        const existing = this.app.vault.getAbstractFileByPath(newPath);
+        if (existing && existing !== img) {
+          totalFailed++;
+          new Notice(`跳过 ${img.path}：目标名称已被占用 ${newPath}`);
+          continue;
+        }
+
+        try {
+          const oldPathInLink = img.path;
+
+          await this.app.fileManager.renameFile(img, newPath);
+          totalRenamed++;
+
+          const newFile = this.app.vault.getAbstractFileByPath(newPath);
+          if (!(newFile instanceof TFile)) continue;
+
+          const allMd = this.app.vault.getMarkdownFiles();
+          for (const md of allMd) {
+            try {
+              let content = await this.app.vault.read(md);
+              let changed = false;
+              const oldPathEscaped = oldPathInLink.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const newPathForLink = newFile.path;
+
+              const wikilinkRegex = new RegExp(`(!?\\[\\[)${oldPathEscaped}(\\|[^\\]]*)?\\]\\]`, 'g');
+              const newContent1 = content.replace(wikilinkRegex, (_, prefix, opt) => prefix + newPathForLink + (opt || '') + ']]');
+              if (newContent1 !== content) {
+                content = newContent1;
+                changed = true;
+              }
+              const mdLinkRegex = new RegExp(`(\\]\\()(${oldPathEscaped})([^)]*\\))`, 'g');
+              const newContent2 = content.replace(mdLinkRegex, (_, before, _path, after) => before + newPathForLink + after);
+              if (newContent2 !== content) {
+                content = newContent2;
+                changed = true;
+              }
+              if (changed) await this.app.vault.modify(md, content);
+            } catch (_) {
+              // 单文件更新失败不中断
+            }
+          }
+        } catch (err) {
+          totalFailed++;
+          console.error(`重命名图片失败: ${img.path}`, err);
+          new Notice(`重命名失败: ${img.path}`);
+        }
+      }
+    }
+
+    new Notice(`图片重命名完成: 成功 ${totalRenamed}，跳过 ${totalSkipped}，失败 ${totalFailed}`);
+    await this.loadFiles();
   }
 }
 
