@@ -708,6 +708,13 @@ class BatchFileManagerView extends ItemView {
     const renameImagesBtn = toolbar.createEl('button', { text: '图片重命名(文件名-001)' });
     renameImagesBtn.onclick = () => this.renameImagesToNoteName();
 
+    // 图片路径风格切换
+    const toRelativePathBtn = toolbar.createEl('button', { text: '图片转相对路径' });
+    toRelativePathBtn.onclick = () => this.convertImageLinksToRelativePath();
+
+    const toSimplePathBtn = toolbar.createEl('button', { text: '图片转最简路径' });
+    toSimplePathBtn.onclick = () => this.convertImageLinksToSimplePath();
+
     // 按标签筛选按钮
     const filterByTagBtn = toolbar.createEl('button', { text: '按标签筛选' });
     filterByTagBtn.onclick = () => this.showTagFilterModal();
@@ -1484,28 +1491,88 @@ class BatchFileManagerView extends ItemView {
       return;
     }
 
+    // 构建图片路径集合和文件名到路径的映射
     const imagePathSet = new Set(imageFiles.map(f => f.path));
+    const imageNameToPath = new Map<string, string>();
+    for (const f of imageFiles) {
+      // 同名图片可能在不同文件夹，这里只记录第一个（用于简写链接匹配）
+      const name = f.name.toLowerCase();
+      if (!imageNameToPath.has(name)) {
+        imageNameToPath.set(name, f.path);
+      }
+    }
+    
     const referencedPaths = new Set<string>();
 
     const allMd = this.app.vault.getMarkdownFiles();
     for (const md of allMd) {
+      // 方法1：使用 metadataCache（可能有缓存延迟）
       const cache = this.app.metadataCache.getFileCache(md);
-      if (!cache) continue;
-      const linksToResolve = [
-        ...(cache.embeds || []),
-        ...(cache.links || [])
-      ];
-      for (const link of linksToResolve) {
-        // 先按原始 link 解析，再按 URL 解码后的路径解析（含空格的图片常被写成 %20，不解码会误判为未引用）
-        const decoded = this.safeDecodeUriPath(link.link);
-        const linkVariants = decoded !== link.link ? [link.link, decoded] : [link.link];
-        for (const linkPath of linkVariants) {
-          const dest = this.app.metadataCache.getFirstLinkpathDest(linkPath, md.path);
-          if (dest && dest instanceof TFile && imagePathSet.has(dest.path)) {
-            referencedPaths.add(dest.path);
-            break;
+      if (cache) {
+        const linksToResolve = [
+          ...(cache.embeds || []),
+          ...(cache.links || [])
+        ];
+        for (const link of linksToResolve) {
+          const decoded = this.safeDecodeUriPath(link.link);
+          const linkVariants = decoded !== link.link ? [link.link, decoded] : [link.link];
+          for (const linkPath of linkVariants) {
+            const dest = this.app.metadataCache.getFirstLinkpathDest(linkPath, md.path);
+            if (dest && dest instanceof TFile && imagePathSet.has(dest.path)) {
+              referencedPaths.add(dest.path);
+              break;
+            }
           }
         }
+      }
+      
+      // 方法2：直接读取文件内容匹配（解决缓存延迟问题）
+      try {
+        const content = await this.app.vault.cachedRead(md);
+        // 匹配 ![xxx](yyy) 格式
+        const mdLinkRegex = /!\[[^\]]*\]\(([^)]+)\)/g;
+        let match;
+        while ((match = mdLinkRegex.exec(content)) !== null) {
+          const linkPath = match[1];
+          const decoded = this.safeDecodeUriPath(linkPath);
+          const variants = decoded !== linkPath ? [linkPath, decoded] : [linkPath];
+          
+          for (const variant of variants) {
+            // 尝试完整路径
+            if (imagePathSet.has(variant)) {
+              referencedPaths.add(variant);
+              break;
+            }
+            // 尝试仅文件名匹配（简写链接如 ![](xxx.png)）
+            const fileName = variant.split('/').pop()?.toLowerCase();
+            if (fileName && imageNameToPath.has(fileName)) {
+              referencedPaths.add(imageNameToPath.get(fileName)!);
+              break;
+            }
+          }
+        }
+        
+        // 匹配 ![[xxx]] 格式
+        const wikiLinkRegex = /!\[\[([^\]]+)\]\]/g;
+        while ((match = wikiLinkRegex.exec(content)) !== null) {
+          const linkPath = match[1].split('|')[0]; // 去除别名
+          const decoded = this.safeDecodeUriPath(linkPath);
+          const variants = decoded !== linkPath ? [linkPath, decoded] : [linkPath];
+          
+          for (const variant of variants) {
+            if (imagePathSet.has(variant)) {
+              referencedPaths.add(variant);
+              break;
+            }
+            const fileName = variant.split('/').pop()?.toLowerCase();
+            if (fileName && imageNameToPath.has(fileName)) {
+              referencedPaths.add(imageNameToPath.get(fileName)!);
+              break;
+            }
+          }
+        }
+      } catch (e) {
+        // 读取失败时忽略
       }
     }
 
@@ -1945,6 +2012,205 @@ class BatchFileManagerView extends ItemView {
 
     new Notice(`图片重命名完成: 成功 ${totalRenamed}，跳过 ${totalSkipped}，失败 ${totalFailed}`);
     await this.loadFiles();
+  }
+
+  /** 计算从 fromPath 到 toPath 的相对路径 */
+  private getRelativePath(fromDir: string, toPath: string): string {
+    const fromParts = fromDir ? fromDir.split('/') : [];
+    const toParts = toPath.split('/');
+    
+    // 找到共同前缀长度
+    let commonLength = 0;
+    while (commonLength < fromParts.length && commonLength < toParts.length - 1 &&
+           fromParts[commonLength] === toParts[commonLength]) {
+      commonLength++;
+    }
+    
+    // 计算需要回退的层数
+    const backSteps = fromParts.length - commonLength;
+    const relativeParts: string[] = [];
+    
+    // 添加 .. 回退
+    for (let i = 0; i < backSteps; i++) {
+      relativeParts.push('..');
+    }
+    
+    // 添加目标路径的剩余部分
+    for (let i = commonLength; i < toParts.length; i++) {
+      relativeParts.push(toParts[i]);
+    }
+    
+    return relativeParts.join('/');
+  }
+
+  /** 
+   * 按优先级查找图片文件
+   * 优先级：同级目录 → 同级 assets → 同级 attachments → 根目录 assets → 根目录 attachments → 全局查找
+   */
+  private findImageFile(fileName: string, noteDir: string, notePath: string): TFile | null {
+    const decoded = this.safeDecodeUriPath(fileName);
+    const namesToTry = decoded !== fileName ? [fileName, decoded] : [fileName];
+    
+    // 常用图片文件夹名称
+    const commonFolders = ['assets', 'attachments', 'images', 'img', 'pics', 'media'];
+    
+    for (const name of namesToTry) {
+      // 1. 同级目录
+      const sameDirPath = noteDir ? `${noteDir}/${name}` : name;
+      const sameDirFile = this.app.vault.getAbstractFileByPath(sameDirPath);
+      if (sameDirFile && sameDirFile instanceof TFile) return sameDirFile;
+      
+      // 2. 同级目录下的常用文件夹
+      for (const folder of commonFolders) {
+        const subFolderPath = noteDir ? `${noteDir}/${folder}/${name}` : `${folder}/${name}`;
+        const subFolderFile = this.app.vault.getAbstractFileByPath(subFolderPath);
+        if (subFolderFile && subFolderFile instanceof TFile) return subFolderFile;
+      }
+      
+      // 3. 根目录下的常用文件夹
+      for (const folder of commonFolders) {
+        const rootFolderPath = `${folder}/${name}`;
+        const rootFolderFile = this.app.vault.getAbstractFileByPath(rootFolderPath);
+        if (rootFolderFile && rootFolderFile instanceof TFile) return rootFolderFile;
+      }
+    }
+    
+    // 4. 使用 metadataCache 全局查找（兜底）
+    for (const name of namesToTry) {
+      const file = this.app.metadataCache.getFirstLinkpathDest(name, notePath);
+      if (file && file instanceof TFile) return file;
+    }
+    
+    return null;
+  }
+
+  /** 将选中笔记中的图片链接转换为相对路径（兼容 Typora 等编辑器） */
+  private async convertImageLinksToRelativePath() {
+    const selected = this.getSelectedFiles();
+    if (selected.length === 0) {
+      new Notice('请先选择要处理的笔记');
+      return;
+    }
+
+    const noteFiles = selected.filter(f => f.extension === 'md');
+    if (noteFiles.length === 0) {
+      new Notice('选中的文件中没有笔记（.md）');
+      return;
+    }
+
+    let totalConverted = 0;
+    let totalNotes = 0;
+
+    for (const note of noteFiles) {
+      try {
+        let content = await this.app.vault.read(note);
+        let changed = false;
+        const noteDir = note.parent?.path || '';
+
+        // 处理 ![[xxx]] 格式（Obsidian wiki 风格）
+        content = content.replace(/!\[\[([^\]|]+)(\|[^\]]*)?\]\]/g, (match, linkPath, displayPart) => {
+          // 提取文件名（可能包含路径）
+          const fileName = linkPath.split('/').pop() || linkPath;
+          const file = this.findImageFile(fileName, noteDir, note.path);
+          if (file) {
+            const relativePath = this.getRelativePath(noteDir, file.path);
+            // 如果链接已经是相对路径，跳过
+            if (linkPath === relativePath) return match;
+            changed = true;
+            totalConverted++;
+            return `![](${relativePath})`;
+          }
+          return match;
+        });
+
+        // 处理 ![xxx](yyy) 格式（Markdown 风格）
+        content = content.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, linkPath) => {
+          // 跳过已经是相对路径的（包含 ../ 或 ./）
+          if (linkPath.startsWith('../') || linkPath.startsWith('./')) return match;
+          // 跳过网络链接
+          if (linkPath.startsWith('http://') || linkPath.startsWith('https://')) return match;
+          
+          // 提取文件名
+          const fileName = linkPath.split('/').pop() || linkPath;
+          const file = this.findImageFile(fileName, noteDir, note.path);
+          if (file) {
+            const relativePath = this.getRelativePath(noteDir, file.path);
+            if (linkPath === relativePath) return match;
+            changed = true;
+            totalConverted++;
+            return `![${alt}](${relativePath})`;
+          }
+          return match;
+        });
+
+        if (changed) {
+          await this.app.vault.modify(note, content);
+          totalNotes++;
+        }
+      } catch (err) {
+        console.error(`转换图片链接失败: ${note.path}`, err);
+      }
+    }
+
+    new Notice(`图片转相对路径完成: ${totalNotes} 个笔记，${totalConverted} 个链接`);
+  }
+
+  /** 将选中笔记中的图片链接转换为最简路径（仅文件名） */
+  private async convertImageLinksToSimplePath() {
+    const selected = this.getSelectedFiles();
+    if (selected.length === 0) {
+      new Notice('请先选择要处理的笔记');
+      return;
+    }
+
+    const noteFiles = selected.filter(f => f.extension === 'md');
+    if (noteFiles.length === 0) {
+      new Notice('选中的文件中没有笔记（.md）');
+      return;
+    }
+
+    let totalConverted = 0;
+    let totalNotes = 0;
+
+    for (const note of noteFiles) {
+      try {
+        let content = await this.app.vault.read(note);
+        let changed = false;
+        const noteDir = note.parent?.path || '';
+
+        // 处理 ![[xxx]] 格式 - 已经是最简路径，跳过
+        // 处理 ![xxx](yyy) 格式
+        content = content.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, linkPath) => {
+          // 跳过网络链接
+          if (linkPath.startsWith('http://') || linkPath.startsWith('https://')) return match;
+          
+          // 提取文件名
+          const fileName = linkPath.split('/').pop();
+          if (!fileName) return match;
+          
+          // 如果已经是最简路径（不包含路径分隔符），跳过
+          if (!linkPath.includes('/')) return match;
+          
+          // 使用优先级查找验证文件是否存在
+          const file = this.findImageFile(fileName, noteDir, note.path);
+          if (file) {
+            changed = true;
+            totalConverted++;
+            return `![${alt}](${file.name})`;
+          }
+          return match;
+        });
+
+        if (changed) {
+          await this.app.vault.modify(note, content);
+          totalNotes++;
+        }
+      } catch (err) {
+        console.error(`转换图片链接失败: ${note.path}`, err);
+      }
+    }
+
+    new Notice(`图片转最简路径完成: ${totalNotes} 个笔记，${totalConverted} 个链接`);
   }
 }
 
