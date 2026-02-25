@@ -5,7 +5,7 @@
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "build": "node esbuild.config.mjs production",
     "deploy": "npm run build && node deploy.mjs",
     "release": "node release.mjs"
   },
@@ -21,5 +21,8 @@
     "obsidian": "latest",
     "tslib": "2.4.0",
     "typescript": "4.7.4"
+  },
+  "dependencies": {
+    "mermaid": "^11.12.3"
   }
 }

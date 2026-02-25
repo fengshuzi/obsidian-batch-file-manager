@@ -724,6 +724,10 @@ class BatchFileManagerView extends ItemView {
     const splitJournalsBtn = toolbar.createEl('button', { text: '一键还原日志' });
     splitJournalsBtn.onclick = () => this.monthToDaily();
 
+    // 流程图转导出版
+    const mermaidExportBtn = toolbar.createEl('button', { text: '流程图转导出版' });
+    mermaidExportBtn.onclick = () => this.mermaidToExportMd();
+
     // 按标签筛选按钮
     const filterByTagBtn = toolbar.createEl('button', { text: '按标签筛选' });
     filterByTagBtn.onclick = () => this.showTagFilterModal();
@@ -2210,6 +2214,153 @@ class BatchFileManagerView extends ItemView {
     }
     new Notice(`一键还原完成: 还原 ${totalRestored} 个日文件`);
     await this.loadFiles();
+  }
+
+  /** 流程图转导出版：渲染 mermaid 代码块为图片，生成新 md（去掉代码块，仅保留图片引用），便于复制到其他网站 */
+  private async mermaidToExportMd() {
+    const selected = this.getSelectedFiles();
+    const mdFiles = selected.filter((f) => f.extension === 'md');
+    if (mdFiles.length === 0) {
+      new Notice('请先选择包含 mermaid 流程图的笔记');
+      return;
+    }
+
+    const assetsFolder = (this.plugin.settings.imageFolders?.split(',')[0]?.trim() || 'assets').replace(/\/$/, '');
+    const MERMAID_BLOCK_RE = /^```mermaid\s*\n([\s\S]*?)```\s*$/gm;
+
+    let renderId = 0;
+    let mermaid: { initialize: (c: { startOnLoad?: boolean; securityLevel?: string }) => void; render: (id: string, code: string) => Promise<{ svg: string }> };
+    try {
+      mermaid = (await import('mermaid')).default;
+      mermaid.initialize({ startOnLoad: false, securityLevel: 'loose' });
+    } catch (e) {
+      new Notice('Mermaid 加载失败');
+      return;
+    }
+
+    let totalExported = 0;
+    for (const note of mdFiles) {
+      let content: string;
+      try {
+        content = await this.app.vault.read(note);
+      } catch {
+        new Notice(`无法读取 ${note.path}`);
+        continue;
+      }
+
+      const blocks: { fullMatch: string; code: string; index: number }[] = [];
+      let m: RegExpExecArray | null;
+      MERMAID_BLOCK_RE.lastIndex = 0;
+      while ((m = MERMAID_BLOCK_RE.exec(content)) !== null) {
+        blocks.push({ fullMatch: m[0], code: m[1].trim(), index: m.index });
+      }
+      if (blocks.length === 0) {
+        new Notice(`${note.basename}：未找到 mermaid 代码块`);
+        continue;
+      }
+
+      const replacements: { from: string; to: string }[] = [];
+      for (let i = 0; i < blocks.length; i++) {
+        const { fullMatch, code } = blocks[i];
+        if (!code) continue;
+        const id = `mermaid-${Date.now()}-${renderId++}`;
+        let svg: string;
+        try {
+          const result = await mermaid.render(id, code);
+          svg = result.svg;
+        } catch (err) {
+          new Notice(`Mermaid 渲染失败 (第 ${i + 1} 个): ${String(err)}`);
+          continue;
+        }
+
+        const pngBuffer = await this.svgToPng(svg);
+        const baseName = note.basename.replace(/[#%&+=?@[\]\\|<>:"*]/g, '_');
+        const imgName = `${baseName}-mermaid-${String(i + 1).padStart(3, '0')}.png`;
+        const imgPath = assetsFolder ? `${assetsFolder}/${imgName}` : imgName;
+
+        const folder = this.app.vault.getAbstractFileByPath(assetsFolder);
+        if (!folder || !(folder instanceof TFolder)) {
+          try {
+            await this.app.vault.createFolder(assetsFolder);
+          } catch {
+            new Notice(`无法创建文件夹 ${assetsFolder}`);
+            continue;
+          }
+        }
+        try {
+          await this.app.vault.adapter.writeBinary(imgPath, pngBuffer);
+        } catch (e) {
+          new Notice(`保存图片失败 ${imgPath}`);
+          continue;
+        }
+
+        const imgLink = `\n![](${imgPath})\n`;
+        replacements.push({ from: fullMatch, to: imgLink });
+      }
+
+      if (replacements.length === 0) continue;
+
+      let newContent = content;
+      for (const { from, to } of replacements) {
+        newContent = newContent.replace(from, to);
+      }
+
+      const outDir = note.parent?.path ?? '';
+      const outName = `${note.basename}-导出版.md`;
+      const outPath = outDir ? `${outDir}/${outName}` : outName;
+      const exists = this.app.vault.getAbstractFileByPath(outPath);
+      try {
+        if (exists && exists instanceof TFile) {
+          await this.app.vault.modify(exists, newContent);
+        } else {
+          await this.app.vault.create(outPath, newContent);
+        }
+        totalExported++;
+      } catch (e) {
+        new Notice(`创建导出版失败 ${outPath}`);
+      }
+    }
+    new Notice(`流程图转导出版完成: ${totalExported} 个文件`);
+    await this.loadFiles();
+  }
+
+  /** SVG 字符串转为 PNG ArrayBuffer */
+  private svgToPng(svg: string): Promise<ArrayBuffer> {
+    return new Promise((resolve, reject) => {
+      const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const img = document.createElement('img');
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(img.naturalWidth || 800, 400);
+        canvas.height = Math.max(img.naturalHeight || 600, 300);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('无法获取 canvas 上下文'));
+          return;
+        }
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+        canvas.toBlob(
+          (b) => {
+            if (!b) {
+              reject(new Error('toBlob 失败'));
+              return;
+            }
+            b.arrayBuffer().then(resolve).catch(reject);
+          },
+          'image/png',
+          0.95
+        );
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error('SVG 加载失败'));
+      };
+      img.src = url;
+    });
   }
 
   /** 计算从 fromPath 到 toPath 的相对路径 */
