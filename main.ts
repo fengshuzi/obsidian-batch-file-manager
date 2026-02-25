@@ -1913,6 +1913,38 @@ class BatchFileManagerView extends ItemView {
       .trim() || 'untitled';
   }
 
+  /** 在所有 Markdown 中将旧文件名替换为新文件名（用于相对路径等不一致的链接） */
+  private async updateImageLinksInAllMd(oldFileName: string, newFileName: string): Promise<void> {
+    if (oldFileName === newFileName) return;
+    const escaped = oldFileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(escaped, 'g');
+    for (const md of this.app.vault.getMarkdownFiles()) {
+      try {
+        const content = await this.app.vault.read(md);
+        const newContent = content.replace(re, newFileName);
+        if (newContent !== content) await this.app.vault.modify(md, newContent);
+      } catch {
+        // 单文件失败不中断
+      }
+    }
+  }
+
+  /** 将所有 md 中「未规范化的基名-」替换为「规范化基名-」，修复已改名但链接仍为旧名的断链 */
+  private async fixBrokenImageLinksWithBaseName(unsanitizedBase: string, sanitizedBase: string): Promise<void> {
+    if (unsanitizedBase === sanitizedBase) return;
+    const oldPrefix = unsanitizedBase + '-';
+    const newPrefix = sanitizedBase + '-';
+    for (const md of this.app.vault.getMarkdownFiles()) {
+      try {
+        const content = await this.app.vault.read(md);
+        const newContent = content.split(oldPrefix).join(newPrefix);
+        if (newContent !== content) await this.app.vault.modify(md, newContent);
+      } catch {
+        // 单文件失败不中断
+      }
+    }
+  }
+
   /** 获取文件夹中已占用的「基名-数字」编号，用于避免重名 */
   private getUsedNumberSuffixes(folderPath: string, baseName: string, ext: string): Set<number> {
     const used = new Set<number>();
@@ -1973,6 +2005,11 @@ class BatchFileManagerView extends ItemView {
 
         if (img.name === newName) {
           totalSkipped++;
+          // 文件已改名，但链接可能仍是旧名（如相对路径 ../assets/旧 名.png），需单独更新
+          const oldNameForLink = `${note.basename}-${String(num).padStart(3, '0')}.${ext}`;
+          if (oldNameForLink !== newName) {
+            await this.updateImageLinksInAllMd(oldNameForLink, newName);
+          }
           continue;
         }
 
@@ -2001,15 +2038,15 @@ class BatchFileManagerView extends ItemView {
               const newPathForLink = newFile.path;
 
               const wikilinkRegex = new RegExp(`(!?\\[\\[)${oldPathEscaped}(\\|[^\\]]*)?\\]\\]`, 'g');
-              const newContent1 = content.replace(wikilinkRegex, (_, prefix, opt) => prefix + newPathForLink + (opt || '') + ']]');
-              if (newContent1 !== content) {
-                content = newContent1;
+              let newContent = content.replace(wikilinkRegex, (_, prefix, opt) => prefix + newPathForLink + (opt || '') + ']]');
+              if (newContent !== content) {
+                content = newContent;
                 changed = true;
               }
               const mdLinkRegex = new RegExp(`(\\]\\()(${oldPathEscaped})([^)]*\\))`, 'g');
-              const newContent2 = content.replace(mdLinkRegex, (_, before, _path, after) => before + newPathForLink + after);
-              if (newContent2 !== content) {
-                content = newContent2;
+              newContent = content.replace(mdLinkRegex, (_, before, _path, after) => before + newPathForLink + after);
+              if (newContent !== content) {
+                content = newContent;
                 changed = true;
               }
               if (changed) await this.app.vault.modify(md, content);
@@ -2017,12 +2054,16 @@ class BatchFileManagerView extends ItemView {
               // 单文件更新失败不中断
             }
           }
+          // 相对路径等：按“文件名”替换，确保 ](../assets/旧 名.png) 也会被更新
+          await this.updateImageLinksInAllMd(img.name, newName);
         } catch (err) {
           totalFailed++;
           console.error(`重命名图片失败: ${img.path}`, err);
           new Notice(`重命名失败: ${img.path}`);
         }
       }
+      // 修复已改名但链接仍为旧名（含空格）的断链，如 ](../assets/旧 名.png)
+      await this.fixBrokenImageLinksWithBaseName(note.basename, baseName);
     }
 
     new Notice(`图片重命名完成: 成功 ${totalRenamed}，跳过 ${totalSkipped}，失败 ${totalFailed}`);
