@@ -2103,7 +2103,7 @@ class BatchFileManagerView extends ItemView {
 
     for (const child of folder.children) {
       if (!(child instanceof TFile)) continue;
-      const m = child.basename.match(dailyPattern);
+      const m = child.name.match(dailyPattern);
       if (!m) continue;
       const dateStr = `${m[1]}-${m[2]}-${m[3]}`;
       const yearMonth = dateStr.slice(0, 7);
@@ -2177,9 +2177,9 @@ class BatchFileManagerView extends ItemView {
     const monthFiles: TFile[] = [];
     for (const child of folder.children) {
       if (!(child instanceof TFile)) continue;
-      if (monthPattern.test(child.basename)) monthFiles.push(child);
+      if (monthPattern.test(child.name)) monthFiles.push(child);
     }
-    monthFiles.sort((a, b) => a.basename.localeCompare(b.basename));
+    monthFiles.sort((a, b) => a.name.localeCompare(b.name));
 
     let totalRestored = 0;
     for (const mf of monthFiles) {
