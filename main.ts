@@ -2273,9 +2273,8 @@ class BatchFileManagerView extends ItemView {
           continue;
         }
 
-        const pngBuffer = await this.svgToPng(svg);
         const baseName = note.basename.replace(/[#%&+=?@[\]\\|<>:"*]/g, '_');
-        const imgName = `${baseName}-mermaid-${String(i + 1).padStart(3, '0')}.png`;
+        const imgName = `${baseName}-mermaid-${String(i + 1).padStart(3, '0')}.svg`;
         const imgPath = assetsFolder ? `${assetsFolder}/${imgName}` : imgName;
 
         const folder = this.app.vault.getAbstractFileByPath(assetsFolder);
@@ -2288,7 +2287,7 @@ class BatchFileManagerView extends ItemView {
           }
         }
         try {
-          await this.app.vault.adapter.writeBinary(imgPath, pngBuffer);
+          await this.app.vault.adapter.write(imgPath, svg);
         } catch (e) {
           new Notice(`保存图片失败 ${imgPath}`);
           continue;
@@ -2322,45 +2321,6 @@ class BatchFileManagerView extends ItemView {
     }
     new Notice(`流程图转导出版完成: ${totalExported} 个文件`);
     await this.loadFiles();
-  }
-
-  /** SVG 字符串转为 PNG ArrayBuffer */
-  private svgToPng(svg: string): Promise<ArrayBuffer> {
-    return new Promise((resolve, reject) => {
-      const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const img = document.createElement('img');
-      img.onload = () => {
-        URL.revokeObjectURL(url);
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.max(img.naturalWidth || 800, 400);
-        canvas.height = Math.max(img.naturalHeight || 600, 300);
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          reject(new Error('无法获取 canvas 上下文'));
-          return;
-        }
-        ctx.fillStyle = 'white';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0);
-        canvas.toBlob(
-          (b) => {
-            if (!b) {
-              reject(new Error('toBlob 失败'));
-              return;
-            }
-            b.arrayBuffer().then(resolve).catch(reject);
-          },
-          'image/png',
-          0.95
-        );
-      };
-      img.onerror = () => {
-        URL.revokeObjectURL(url);
-        reject(new Error('SVG 加载失败'));
-      };
-      img.src = url;
-    });
   }
 
   /** 计算从 fromPath 到 toPath 的相对路径 */
