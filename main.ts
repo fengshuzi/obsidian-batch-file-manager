@@ -13,6 +13,7 @@ interface BatchFileManagerSettings {
   scanExternalImages: boolean;
   imageExtensions: string;
   imageFolders: string; // 图片文件夹列表，用逗号分隔
+  journalsFolder: string; // 日记文件夹路径，用于一键归档/还原
 }
 
 const DEFAULT_SETTINGS: BatchFileManagerSettings = {
@@ -20,7 +21,8 @@ const DEFAULT_SETTINGS: BatchFileManagerSettings = {
   tagPosition: 'start',
   scanExternalImages: false,
   imageExtensions: 'png,jpg,jpeg,gif,svg,webp,bmp',
-  imageFolders: 'assets'
+  imageFolders: 'assets',
+  journalsFolder: 'journals'
 };
 
 class FolderSelectModal extends Modal {
@@ -714,6 +716,13 @@ class BatchFileManagerView extends ItemView {
 
     const toSimplePathBtn = toolbar.createEl('button', { text: '图片转最简路径' });
     toSimplePathBtn.onclick = () => this.convertImageLinksToSimplePath();
+
+    // 日记归档 / 还原
+    const mergeJournalsBtn = toolbar.createEl('button', { text: '一键归档日志' });
+    mergeJournalsBtn.onclick = () => this.mergeJournalsToMonth();
+
+    const splitJournalsBtn = toolbar.createEl('button', { text: '一键还原日志' });
+    splitJournalsBtn.onclick = () => this.monthToDaily();
 
     // 按标签筛选按钮
     const filterByTagBtn = toolbar.createEl('button', { text: '按标签筛选' });
@@ -2075,6 +2084,134 @@ class BatchFileManagerView extends ItemView {
     await this.loadFiles();
   }
 
+  /** 日文件 → 月文件：将 yyyy-mm-dd.md 合并为 yyyy-mm.md（跳过当前月） */
+  private async mergeJournalsToMonth() {
+    const dir = this.plugin.settings.journalsFolder?.trim() || 'journals';
+    const folder = this.app.vault.getAbstractFileByPath(dir);
+    if (!folder || !(folder instanceof TFolder)) {
+      new Notice(`日记文件夹不存在: ${dir}`);
+      return;
+    }
+    const dailyPattern = /^(\d{4})-(\d{2})-(\d{2})\.md$/;
+    const sectionHeader = /^(?:- )?## (\d{4}-\d{2}-\d{2})\s*$/gm;
+
+    const now = new Date();
+    const currentYm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+    const monthEntries: Record<string, { dateStr: string; content: string }[]> = {};
+    const monthDeletes: Record<string, TFile[]> = {};
+
+    for (const child of folder.children) {
+      if (!(child instanceof TFile)) continue;
+      const m = child.basename.match(dailyPattern);
+      if (!m) continue;
+      const dateStr = `${m[1]}-${m[2]}-${m[3]}`;
+      const yearMonth = dateStr.slice(0, 7);
+      if (yearMonth === currentYm) continue;
+      let raw: string;
+      try {
+        raw = (await this.app.vault.read(child)).trim();
+        if (!raw) continue;
+      } catch {
+        continue;
+      }
+      if (!monthEntries[yearMonth]) {
+        monthEntries[yearMonth] = [];
+        monthDeletes[yearMonth] = [];
+      }
+      monthEntries[yearMonth].push({ dateStr, content: raw });
+      monthDeletes[yearMonth].push(child);
+    }
+
+    let totalMerged = 0;
+    let totalDeleted = 0;
+    for (const month of Object.keys(monthEntries).sort()) {
+      const outputPath = dir ? `${dir}/${month}.md` : `${month}.md`;
+      let existing: Record<string, string> = {};
+      const existingFile = this.app.vault.getAbstractFileByPath(outputPath);
+      if (existingFile && existingFile instanceof TFile) {
+        try {
+          const content = await this.app.vault.read(existingFile);
+          const parts = content.split(sectionHeader);
+          for (let i = 1; i + 1 < parts.length; i += 2) {
+            const d = parts[i].trim();
+            existing[d] = parts[i + 1].trim();
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      for (const { dateStr, content } of monthEntries[month]) {
+        existing[dateStr] = content;
+      }
+      const entries = Object.entries(existing)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([d, c]) => `## ${d}\n\n${c}\n\n`);
+      const body = entries.join('\n');
+      if (existingFile && existingFile instanceof TFile) {
+        await this.app.vault.modify(existingFile, body);
+      } else {
+        await this.app.vault.create(outputPath, body);
+      }
+      totalMerged++;
+      for (const f of monthDeletes[month]) {
+        await this.app.vault.delete(f);
+        totalDeleted++;
+      }
+    }
+    new Notice(`一键归档完成: 合并 ${totalMerged} 个月份，删除 ${totalDeleted} 个日文件`);
+    await this.loadFiles();
+  }
+
+  /** 月文件 → 日文件：将 yyyy-mm.md 按 ## yyyy-mm-dd 拆成 yyyy-mm-dd.md */
+  private async monthToDaily() {
+    const dir = this.plugin.settings.journalsFolder?.trim() || 'journals';
+    const folder = this.app.vault.getAbstractFileByPath(dir);
+    if (!folder || !(folder instanceof TFolder)) {
+      new Notice(`日记文件夹不存在: ${dir}`);
+      return;
+    }
+    const monthPattern = /^(\d{4})-(\d{2})\.md$/;
+    const sectionHeader = /^(?:- )?## (\d{4}-\d{2}-\d{2})\s*$/gm;
+
+    const monthFiles: TFile[] = [];
+    for (const child of folder.children) {
+      if (!(child instanceof TFile)) continue;
+      if (monthPattern.test(child.basename)) monthFiles.push(child);
+    }
+    monthFiles.sort((a, b) => a.basename.localeCompare(b.basename));
+
+    let totalRestored = 0;
+    for (const mf of monthFiles) {
+      const content = await this.app.vault.read(mf);
+      const parts = content.split(sectionHeader);
+      const entries: { dateStr: string; block: string }[] = [];
+      for (let i = 1; i + 1 < parts.length; i += 2) {
+        const dateStr = parts[i].trim();
+        const block = parts[i + 1].trim();
+        if (!block) continue;
+        entries.push({ dateStr, block });
+      }
+      if (entries.length === 0) {
+        new Notice(`跳过 ${mf.path}：未找到日期段落`);
+        continue;
+      }
+      for (const { dateStr, block } of entries) {
+        const outPath = dir ? `${dir}/${dateStr}.md` : `${dateStr}.md`;
+        const exists = this.app.vault.getAbstractFileByPath(outPath);
+        if (exists && exists instanceof TFile) {
+          await this.app.vault.modify(exists, block);
+        } else {
+          await this.app.vault.create(outPath, block);
+        }
+        totalRestored++;
+      }
+      await this.app.vault.delete(mf);
+    }
+    new Notice(`一键还原完成: 还原 ${totalRestored} 个日文件`);
+    await this.loadFiles();
+  }
+
   /** 计算从 fromPath 到 toPath 的相对路径 */
   private getRelativePath(fromDir: string, toPath: string): string {
     const fromParts = fromDir ? fromDir.split('/') : [];
@@ -2348,6 +2485,20 @@ class BatchFileManagerSettingTab extends PluginSettingTab {
         .setValue(this.plugin.settings.imageFolders)
         .onChange(async (value) => {
           this.plugin.settings.imageFolders = value;
+          await this.plugin.saveSettings();
+        }));
+
+    // 日记归档设置
+    containerEl.createEl('h3', { text: '日记归档' });
+
+    new Setting(containerEl)
+      .setName('日记文件夹')
+      .setDesc('日/月日记所在文件夹（如 journals），用于「一键归档日志」「一键还原」')
+      .addText(text => text
+        .setPlaceholder('journals')
+        .setValue(this.plugin.settings.journalsFolder)
+        .onChange(async (value) => {
+          this.plugin.settings.journalsFolder = value;
           await this.plugin.saveSettings();
         }));
   }
