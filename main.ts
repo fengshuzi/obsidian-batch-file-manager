@@ -1899,6 +1899,20 @@ class BatchFileManagerView extends ItemView {
     return result;
   }
 
+  /**
+   * 将名称规范化为适合 Markdown 图片链接的文件名：空格→下划线，其他特殊字符替换为下划线。
+   * 很多 Markdown 软件不支持带空格的图片链接。
+   */
+  private sanitizeFileNameForLink(name: string): string {
+    if (!name || typeof name !== 'string') return 'untitled';
+    return name
+      .replace(/\s+/g, '_')                    // 空格、制表符等 → 下划线
+      .replace(/[#%&+=?@[\]\\|<>:"*]/g, '_')  // URL/链接中易出问题的字符 → 下划线
+      .replace(/_+/g, '_')                     // 连续多个下划线合并为一个
+      .replace(/^_|_$/g, '')                   // 去掉首尾下划线
+      .trim() || 'untitled';
+  }
+
   /** 获取文件夹中已占用的「基名-数字」编号，用于避免重名 */
   private getUsedNumberSuffixes(folderPath: string, baseName: string, ext: string): Set<number> {
     const used = new Set<number>();
@@ -1938,7 +1952,8 @@ class BatchFileManagerView extends ItemView {
       const images = this.getEmbeddedImages(note);
       if (images.length === 0) continue;
 
-      const baseName = note.basename;
+      // 规范化基名：空格→下划线、特殊字符替换，便于 Markdown 图片链接兼容
+      const baseName = this.sanitizeFileNameForLink(note.basename);
       const usedNumbersByFolder: Record<string, Set<number>> = {};
 
       for (const img of images) {
