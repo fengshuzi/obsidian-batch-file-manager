@@ -1982,10 +1982,15 @@ class BatchFileManagerView extends ItemView {
 
     for (const note of noteFiles) {
       const images = this.getEmbeddedImages(note);
-      if (images.length === 0) continue;
-
       // 规范化基名：空格→下划线、特殊字符替换，便于 Markdown 图片链接兼容
       const baseName = this.sanitizeFileNameForLink(note.basename);
+
+      if (images.length === 0) {
+        // 无已解析的图片（可能链接已断），仍尝试修复「旧基名-」→「新基名-」的引用
+        await this.fixBrokenImageLinksWithBaseName(note.basename, baseName);
+        continue;
+      }
+
       const usedNumbersByFolder: Record<string, Set<number>> = {};
 
       for (const img of images) {
