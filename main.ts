@@ -2274,9 +2274,6 @@ class BatchFileManagerView extends ItemView {
         }
 
         const baseName = note.basename.replace(/[#%&+=?@[\]\\|<>:"*]/g, '_');
-        const imgName = `${baseName}-mermaid-${String(i + 1).padStart(3, '0')}.svg`;
-        const imgPath = assetsFolder ? `${assetsFolder}/${imgName}` : imgName;
-
         const folder = this.app.vault.getAbstractFileByPath(assetsFolder);
         if (!folder || !(folder instanceof TFolder)) {
           try {
@@ -2286,14 +2283,28 @@ class BatchFileManagerView extends ItemView {
             continue;
           }
         }
+
+        let imgPath: string;
         try {
-          await this.app.vault.adapter.write(imgPath, svg);
-        } catch (e) {
-          new Notice(`保存图片失败 ${imgPath}`);
-          continue;
+          const pngBuffer = await this.svgToPng(svg);
+          const imgName = `${baseName}-mermaid-${String(i + 1).padStart(3, '0')}.png`;
+          imgPath = assetsFolder ? `${assetsFolder}/${imgName}` : imgName;
+          await this.app.vault.adapter.writeBinary(imgPath, pngBuffer);
+        } catch (pngErr) {
+          // Canvas taint 时回退到 SVG
+          const imgName = `${baseName}-mermaid-${String(i + 1).padStart(3, '0')}.svg`;
+          imgPath = assetsFolder ? `${assetsFolder}/${imgName}` : imgName;
+          try {
+            await this.app.vault.adapter.write(imgPath, svg);
+          } catch (e) {
+            new Notice(`保存图片失败 ${imgPath}`);
+            continue;
+          }
         }
 
-        const imgLink = `\n![](${imgPath})\n`;
+        const outDir = note.parent?.path ?? '';
+        const pathForLink = this.getRelativePath(outDir, imgPath);
+        const imgLink = `\n![](${pathForLink})\n`;
         replacements.push({ from: fullMatch, to: imgLink });
       }
 
@@ -2321,6 +2332,43 @@ class BatchFileManagerView extends ItemView {
     }
     new Notice(`流程图转导出版完成: ${totalExported} 个文件`);
     await this.loadFiles();
+  }
+
+  /** SVG → PNG，使用 data URL 加载以减少 Canvas taint 风险 */
+  private svgToPng(svg: string): Promise<ArrayBuffer> {
+    return new Promise((resolve, reject) => {
+      const encoded = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
+      const img = document.createElement('img');
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const w = img.naturalWidth || 800, h = img.naturalHeight || 600;
+        const minSide = 1200;
+        const scale = Math.max(1, minSide / Math.max(w, h));
+        canvas.width = Math.ceil(w * scale);
+        canvas.height = Math.ceil(h * scale);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('无法获取 canvas 上下文'));
+          return;
+        }
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(
+          (b) => {
+            if (!b) {
+              reject(new Error('toBlob 失败'));
+              return;
+            }
+            b.arrayBuffer().then(resolve).catch(reject);
+          },
+          'image/png',
+          0.95
+        );
+      };
+      img.onerror = () => reject(new Error('SVG 加载失败'));
+      img.src = encoded;
+    });
   }
 
   /** 计算从 fromPath 到 toPath 的相对路径 */
