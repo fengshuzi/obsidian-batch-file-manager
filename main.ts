@@ -1,4 +1,4 @@
-import { App, Plugin, TFile, TFolder, WorkspaceLeaf, ItemView, Menu, Notice, PluginSettingTab, Setting, SettingDefinitionItem, Modal, TextComponent, MarkdownView, parseLinktext } from 'obsidian';
+import { App, Plugin, TFile, TFolder, WorkspaceLeaf, ItemView, Menu, Notice, PluginSettingTab, Setting, Modal, TextComponent, MarkdownView, parseLinktext } from 'obsidian';
 
 const VIEW_TYPE_BATCH_MANAGER = 'file-commander-view';
 
@@ -48,6 +48,14 @@ function formatJournalDate(d: Date): string {
 
 /** iCloud 多设备同步冲突副本，如 `2026-07-02 2.md` */
 const ICLOUD_CONFLICT_FILE_PATTERN = /^(.+) (\d+)\.md$/;
+
+// 启动日记任务（合并 iCloud 冲突 / 迁移昨日任务）的延迟：等待 iCloud 与 Git 同步先落盘，
+// 避免 vault 刚打开时边写边同步产生新冲突。参考 pay-api git 同步的防抖 DEBOUNCE_S = 15s。
+const STARTUP_JOURNAL_TASKS_DELAY_MS = 15_000;
+
+// iCloud 冲突副本自身也要「稳定」够久才能合并：创建或最后编辑不足 15 秒的副本可能仍在
+// iCloud 下载中（占位/半成品），合并会误判内容（见 BUG.md 2026-08-19 数据丢失事故）。
+const ICLOUD_CONFLICT_STABLE_MS = 15_000;
 
 function mergeLinesWithoutDuplicates(baseContent: string, extraContent: string): { merged: string; addedCount: number } {
   const seen = new Set(baseContent.split('\n'));
@@ -4577,25 +4585,18 @@ class BatchFileManagerSettingTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
-  getSettingDefinitions(): SettingDefinitionItem[] {
-    // 整页命令式设置通过单个 render item 挂到 1.13 声明式容器上（设置搜索可索引）
-    return [
-      {
-        type: 'group',
-        cls: 'fc-settings-root',
-        items: [
-          {
-            name: 'File Commander settings',
-            searchable: false,
-            render: (setting, group) => {
-              setting.settingEl.addClass('fc-settings-row-hidden');
-              group.listEl.empty();
-              this.buildSettings(group.listEl);
-            },
-          },
-        ],
-      },
-    ];
+  // 经典命令式渲染：覆盖 display()，绕开 1.13 声明式 getSettingDefinitions 容器的布局问题（同 keyword-notes-editor 1.0.22 回退先例）。
+  display(): void {
+    const { containerEl } = this;
+    containerEl.empty();
+    try {
+      this.buildSettings(containerEl);
+    } catch (e) {
+      console.error('File Commander settings render failed', e);
+      const errEl = containerEl.createDiv();
+      errEl.createEl('p', { text: '设置渲染失败：' });
+      errEl.createEl('pre', { text: e instanceof Error ? (e.stack || e.message) : String(e) });
+    }
   }
 
   private buildSettings(containerEl: HTMLElement): void {
@@ -4679,7 +4680,7 @@ class BatchFileManagerSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('启动时自动迁移昨日任务')
-      .setDesc('插件启动时自动将昨天日记中未完成的任务迁移到今天')
+      .setDesc('插件启动 15 秒后（等待 iCloud/Git 同步稳定）自动将昨天日记中未完成的任务迁移到今天')
       .addToggle(toggle => toggle
         .setValue(this.plugin.settings.autoMigrateYesterdayTasks)
         .onChange(async (value) => {
@@ -4689,7 +4690,7 @@ class BatchFileManagerSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('启动时自动合并 iCloud 冲突文件')
-      .setDesc('插件启动时在日记文件夹中自动合并 iCloud 冲突副本（如 2026-07-02 2.md），逐行去重后追加到原文件')
+      .setDesc('插件启动 15 秒后（等待 iCloud/Git 同步稳定）在日记文件夹中自动合并 iCloud 冲突副本（如 2026-07-02 2.md），逐行去重后追加到原文件')
       .addToggle(toggle => toggle
         .setValue(this.plugin.settings.autoMergeIcloudConflictFiles)
         .onChange(async (value) => {
@@ -4738,7 +4739,7 @@ export default class BatchFileManagerPlugin extends Plugin {
     // 在工作区准备好后，在左侧边栏添加视图
     this.app.workspace.onLayoutReady(() => {
       this.initLeaf();
-      void this.runStartupJournalTasks();
+      this.scheduleStartupJournalTasks();
     });
   }
 
@@ -4763,6 +4764,17 @@ export default class BatchFileManagerPlugin extends Plugin {
     });
   }
 
+  /** 延迟调度启动日记任务：15 秒后再合并/迁移，避免与 iCloud / Git 的启动同步互相冲突 */
+  private scheduleStartupJournalTasks(): void {
+    if (!this.settings.autoMergeIcloudConflictFiles && !this.settings.autoMigrateYesterdayTasks) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void this.runStartupJournalTasks();
+    }, STARTUP_JOURNAL_TASKS_DELAY_MS);
+    this.register(() => window.clearTimeout(timer));
+  }
+
   private async runStartupJournalTasks(): Promise<void> {
     if (this.settings.autoMergeIcloudConflictFiles) {
       await this.mergeIcloudConflictFiles(false);
@@ -4782,10 +4794,18 @@ export default class BatchFileManagerPlugin extends Plugin {
     }
 
     const conflicts: { file: TFile; baseName: string; num: number }[] = [];
+    let pendingSync = 0;
     for (const child of folder.children) {
       if (!(child instanceof TFile)) continue;
       const match = child.name.match(ICLOUD_CONFLICT_FILE_PATTERN);
       if (!match) continue;
+      // 创建/最后编辑不足 15 秒的副本可能仍在 iCloud 下载或同步写入中，本轮跳过
+      const ageMs = Date.now() - Math.max(child.stat.ctime, child.stat.mtime);
+      if (ageMs < ICLOUD_CONFLICT_STABLE_MS) {
+        pendingSync++;
+        console.warn(`冲突文件创建/编辑不足 ${ICLOUD_CONFLICT_STABLE_MS / 1000} 秒，可能仍在同步，跳过: ${child.path}`);
+        continue;
+      }
       conflicts.push({
         file: child,
         baseName: match[1],
@@ -4794,7 +4814,11 @@ export default class BatchFileManagerPlugin extends Plugin {
     }
 
     if (conflicts.length === 0) {
-      if (showNotices) new Notice('未发现 iCloud 冲突文件');
+      if (showNotices) {
+        new Notice(pendingSync > 0
+          ? `发现 ${pendingSync} 个刚同步的冲突文件，等待其稳定（15 秒）后下次再合并`
+          : '未发现 iCloud 冲突文件');
+      }
       return;
     }
 

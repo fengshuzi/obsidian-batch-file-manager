@@ -1,6 +1,6 @@
 {
   "name": "file-commander",
-  "version": "1.2.3",
+  "version": "1.2.5",
   "description": "批量管理 Obsidian 文件",
   "main": "main.js",
   "scripts": {

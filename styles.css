@@ -836,7 +836,6 @@
 .fc-flex-1 { flex: 1; }
 .fc-checkbox-mr { margin-right: 10px; }
 .fc-input-full { width: 100%; }
-.fc-settings-row-hidden { display: none; }
 .fc-btn-spread { display: flex; justify-content: space-between; gap: 10px; }
 .fc-btn-group { display: flex; gap: 10px; }
 .fc-folder-filter-bar { background-color: var(--background-secondary); }
